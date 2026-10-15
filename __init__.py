@@ -27,18 +27,22 @@ from typing import Optional
 from aqt import mw, gui_hooks
 from aqt.editor import Editor
 from aqt.qt import (
+    QAction,
+    QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGuiApplication,
     QHBoxLayout,
     QKeySequence,
     QKeySequenceEdit,
-    Qt,
     QLabel,
     QLineEdit,
-    QComboBox,
     QPushButton,
+    QTimer,
     QVBoxLayout,
+    Qt,
 )
 from aqt.utils import tooltip
 
@@ -88,6 +92,10 @@ def get_config():
         "field_name": "Front",
         "google_domain": "google.com",
         "shortcut": DEFAULT_SHORTCUT,
+        "snap_layout_enabled": True,
+        "layout_mode": "anki_right_50",
+        "custom_anki_rect": None,
+        "custom_browser_rect": None,
     }
     for key, val in defaults.items():
         if key not in conf:
@@ -107,7 +115,7 @@ class ConfigDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Quick Image Search - Settings")
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(450)
 
         conf = get_config()
 
@@ -183,6 +191,46 @@ class ConfigDialog(QDialog):
         )
         layout.addWidget(hint)
 
+        # Layout section
+        layout_sep = QLabel("Disposition des fenetres :")
+        layout_sep.setStyleSheet("font-weight: bold; margin-top: 8px;")
+        layout.addWidget(layout_sep)
+
+        form_layout = QFormLayout()
+
+        self.snap_cb = QCheckBox("Organiser automatiquement les fenetres cote a cote")
+        self.snap_cb.setChecked(conf.get("snap_layout_enabled", True))
+        form_layout.addRow("", self.snap_cb)
+
+        self.layout_mode_combo = QComboBox()
+        self.layout_mode_combo.addItem("Editeur Anki a droite, navigateur a gauche (50/50)", "anki_right_50")
+        self.layout_mode_combo.addItem("Editeur Anki a gauche, navigateur a droite (50/50)", "anki_left_50")
+        self.layout_mode_combo.addItem("Disposition personnalisee memorisee", "custom")
+
+        mode_val = conf.get("layout_mode", "anki_right_50")
+        for idx in range(self.layout_mode_combo.count()):
+            if self.layout_mode_combo.itemData(idx) == mode_val:
+                self.layout_mode_combo.setCurrentIndex(idx)
+                break
+        form_layout.addRow("Disposition :", self.layout_mode_combo)
+
+        self.custom_anki_rect = conf.get("custom_anki_rect")
+        self.custom_browser_rect = conf.get("custom_browser_rect")
+
+        self.memorize_btn = QPushButton("Memoriser la disposition actuelle (Anki + Navigateur)")
+        self.memorize_btn.setToolTip(
+            "Capture les coordonnees exactes de la fenetre Anki et de votre navigateur a l'ecran."
+        )
+        self.memorize_btn.clicked.connect(self._on_memorize_clicked)
+        form_layout.addRow("", self.memorize_btn)
+
+        self.layout_status_lbl = QLabel()
+        self.layout_status_lbl.setStyleSheet("color: #666; font-size: 11px;")
+        self._update_layout_status()
+        form_layout.addRow("", self.layout_status_lbl)
+
+        layout.addLayout(form_layout)
+
         # Buttons
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -193,6 +241,51 @@ class ConfigDialog(QDialog):
         layout.addWidget(buttons)
 
         self.setLayout(layout)
+
+    def _update_layout_status(self):
+        if self.custom_anki_rect and self.custom_browser_rect:
+            ak = self.custom_anki_rect
+            br = self.custom_browser_rect
+            self.layout_status_lbl.setText(
+                "Position memorisee : Anki (%dx%d a %d,%d) | Navigateur (%dx%d a %d,%d)"
+                % (
+                    ak.get("w", 0),
+                    ak.get("h", 0),
+                    ak.get("x", 0),
+                    ak.get("y", 0),
+                    br.get("w", 0),
+                    br.get("h", 0),
+                    br.get("x", 0),
+                    br.get("y", 0),
+                )
+            )
+        else:
+            self.layout_status_lbl.setText("Aucune disposition personnalisee enregistree (mode 50/50 par defaut).")
+
+    def _on_memorize_clicked(self):
+        anki_win = self.parent() or mw
+        if hasattr(anki_win, "window"):
+            anki_win = anki_win.window()
+        geo = anki_win.geometry()
+        anki_rect = {"x": geo.x(), "y": geo.y(), "w": geo.width(), "h": geo.height()}
+
+        candidate = find_browser_window()
+        if not candidate:
+            self.layout_status_lbl.setText("Aucun navigateur detecte a l'ecran. Ouvrez votre navigateur et reessayez.")
+            return
+
+        b_hwnd, b_cls, b_title, (bx, by, bw, bh) = candidate
+        browser_rect = {"x": bx, "y": by, "w": bw, "h": bh}
+
+        self.custom_anki_rect = anki_rect
+        self.custom_browser_rect = browser_rect
+
+        for idx in range(self.layout_mode_combo.count()):
+            if self.layout_mode_combo.itemData(idx) == "custom":
+                self.layout_mode_combo.setCurrentIndex(idx)
+                break
+
+        self._update_layout_status()
 
     def _on_domain_changed(self, index):
         is_custom = self.domain_combo.currentData() == "custom"
@@ -213,23 +306,46 @@ class ConfigDialog(QDialog):
             seq.toString(QKeySequence.SequenceFormat.PortableText)
         )
 
-        return field_name, domain, shortcut
+        snap_enabled = self.snap_cb.isChecked()
+        layout_mode = self.layout_mode_combo.currentData()
+
+        return (
+            field_name,
+            domain,
+            shortcut,
+            snap_enabled,
+            layout_mode,
+            self.custom_anki_rect,
+            self.custom_browser_rect,
+        )
 
 
 def on_config():
     """Show the config dialog."""
     dlg = ConfigDialog(mw)
     if dlg.exec():
-        field_name, domain, shortcut = dlg.get_values()
+        (
+            field_name,
+            domain,
+            shortcut,
+            snap_enabled,
+            layout_mode,
+            custom_anki_rect,
+            custom_browser_rect,
+        ) = dlg.get_values()
         if field_name and domain:
             conf = get_config()
             conf["field_name"] = field_name
             conf["google_domain"] = domain
             conf["shortcut"] = shortcut
+            conf["snap_layout_enabled"] = snap_enabled
+            conf["layout_mode"] = layout_mode
+            conf["custom_anki_rect"] = custom_anki_rect
+            conf["custom_browser_rect"] = custom_browser_rect
             save_config(conf)
             tooltip(
-                "Settings saved. Field: %s, Domain: %s, Shortcut: %s"
-                % (field_name, domain, shortcut or "none")
+                "Parametres enregistres. Disposition : %s"
+                % ("Activee" if snap_enabled else "Desactivee")
             )
 
 
@@ -359,6 +475,9 @@ def install_web_shortcut(editor):
     # type: (Editor) -> None
     """Install the configured shortcut as a keydown listener in the
     editor page, so it also works while a field has focus."""
+    if not hasattr(editor, "web") or not editor.web:
+        return
+
     spec = shortcut_to_dom_spec(get_config()["shortcut"])
 
     editor.web.eval(
@@ -409,20 +528,224 @@ def get_search_text(editor):
     # type: (Editor) -> Optional[str]
     """Get the text from the configured field of the current note,
     falling back to the first field if not found."""
-    note = editor.note
-    if not note or not note.fields:
+    note = getattr(editor, "note", None)
+    if note is None:
+        note = getattr(editor, "current_note", None)
+    if note is None and callable(getattr(editor, "get_note", None)):
+        try:
+            note = editor.get_note()
+        except Exception:
+            pass
+    if not note and hasattr(editor, "nid") and editor.nid:
+        try:
+            col = getattr(mw, "col", None) or getattr(getattr(editor, "mw", None), "col", None)
+            if col:
+                note = col.get_note(int(editor.nid))
+        except Exception:
+            note = None
+
+    if not note or not getattr(note, "fields", None):
         return None
 
     conf = get_config()
     field_name = conf["field_name"]
 
-    field_names = [f["name"] for f in note.model()["flds"]]
+    note_type = note.note_type() if hasattr(note, "note_type") else note.model()
+    field_names = [f["name"] for f in note_type["flds"]]
     if field_name in field_names:
         raw = note[field_name]
     else:
         raw = note.fields[0]
 
     return strip_html(raw)
+
+
+def find_browser_window():
+    # type: () -> Optional[tuple]
+    """Find the top-level visible browser window (Firefox, Chrome, Edge, etc.)."""
+    if sys.platform != "win32":
+        return None
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+
+        # Ensure enumeration can access the active interactive desktop
+        h_desk = user32.OpenDesktopW("Default", 0, False, 0x01FF)
+        if h_desk:
+            user32.SetThreadDesktop(h_desk)
+
+        browser_classes = ("MozillaWindowClass", "Chrome_WidgetWin_1", "ApplicationFrameWindow")
+        candidates = []
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def enum_cb(hwnd, lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+
+            cls_buf = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(hwnd, cls_buf, 256)
+            cls_name = cls_buf.value
+
+            if cls_name in browser_classes:
+                rect = wintypes.RECT()
+                user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                w = rect.right - rect.left
+                h = rect.bottom - rect.top
+                if w > 200 and h > 200:
+                    length = user32.GetWindowTextLengthW(hwnd)
+                    title = ""
+                    if length > 0:
+                        t_buf = ctypes.create_unicode_buffer(length + 1)
+                        user32.GetWindowTextW(hwnd, t_buf, length + 1)
+                        title = t_buf.value
+                    candidates.append((hwnd, cls_name, title, (rect.left, rect.top, w, h)))
+            return True
+
+        user32.EnumWindows(enum_cb, 0)
+        if not candidates:
+            return None
+
+        def score(item):
+            hwnd, cls, title, (x, y, w, h) = item
+            t_lower = title.lower()
+            val = 0
+            if "google" in t_lower or "recherche" in t_lower or "image" in t_lower:
+                val += 100
+            if "mozilla" in cls.lower():
+                val += 30
+            val += min(w * h // 10000, 50)
+            return val
+
+        candidates.sort(key=score, reverse=True)
+        return candidates[0]
+    except Exception:
+        return None
+
+
+def move_window(hwnd, x, y, w, h):
+    # type: (int, int, int, int, int) -> None
+    """Restore and position a native Win32 window."""
+    if sys.platform != "win32" or not hwnd:
+        return
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        if user32.IsZoomed(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        SWP_NOZORDER = 0x0004
+        SWP_SHOWWINDOW = 0x0040
+        SWP_FRAMECHANGED = 0x0020
+        user32.SetWindowPos(
+            hwnd,
+            0,
+            int(x),
+            int(y),
+            int(w),
+            int(h),
+            SWP_NOZORDER | SWP_SHOWWINDOW | SWP_FRAMECHANGED,
+        )
+    except Exception:
+        pass
+
+
+def apply_side_by_side_layout(editor, url):
+    # type: (Editor, str) -> None
+    """Position Anki and the web browser side-by-side according to user preference."""
+    conf = get_config()
+
+    parent = getattr(editor, "parentWindow", None)
+    top_window = parent() if callable(parent) else parent
+    if not top_window and hasattr(editor, "widget"):
+        top_window = editor.widget
+    if hasattr(top_window, "window") and callable(top_window.window):
+        top_window = top_window.window()
+    if not top_window:
+        top_window = mw
+
+    screen = top_window.screen() if hasattr(top_window, "screen") and callable(top_window.screen) else None
+    if not screen and QGuiApplication.instance():
+        screen = QGuiApplication.primaryScreen()
+
+    if screen:
+        geo = screen.availableGeometry()
+        gx, gy, gw, gh = geo.x(), geo.y(), geo.width(), geo.height()
+    else:
+        gx, gy, gw, gh = 0, 0, 1440, 900
+
+    layout_mode = conf.get("layout_mode", "anki_right_50")
+    custom_anki = conf.get("custom_anki_rect")
+    custom_browser = conf.get("custom_browser_rect")
+
+    if layout_mode == "custom" and custom_anki and custom_browser:
+        anki_rect = (custom_anki["x"], custom_anki["y"], custom_anki["w"], custom_anki["h"])
+        browser_rect = (custom_browser["x"], custom_browser["y"], custom_browser["w"], custom_browser["h"])
+    elif layout_mode == "anki_left_50":
+        split_w = gw // 2
+        anki_rect = (gx, gy, split_w, gh)
+        browser_rect = (gx + split_w, gy, gw - split_w, gh)
+    else:  # "anki_right_50" (default: browser left, Anki right)
+        split_w = gw // 2
+        browser_rect = (gx, gy, split_w, gh)
+        anki_rect = (gx + split_w, gy, gw - split_w, gh)
+
+    # Position Anki window
+    try:
+        if top_window.isMaximized():
+            top_window.showNormal()
+            QTimer.singleShot(
+                40,
+                lambda: top_window.setGeometry(anki_rect[0], anki_rect[1], anki_rect[2], anki_rect[3]),
+            )
+        else:
+            top_window.setGeometry(anki_rect[0], anki_rect[1], anki_rect[2], anki_rect[3])
+    except Exception:
+        pass
+
+    # Open URL in browser
+    webbrowser.open(url)
+
+    # Position browser window with progressive attempts
+    def do_position_browser():
+        candidate = find_browser_window()
+        if candidate:
+            move_window(candidate[0], browser_rect[0], browser_rect[1], browser_rect[2], browser_rect[3])
+
+    do_position_browser()
+    for delay in (120, 300, 600, 1200):
+        QTimer.singleShot(delay, do_position_browser)
+
+
+def on_memorize_current_layout():
+    """Memorize the current position of Anki and browser windows."""
+    anki_win = mw.app.activeWindow() or mw
+    if hasattr(anki_win, "window"):
+        anki_win = anki_win.window()
+
+    geo = anki_win.geometry()
+    anki_rect = {"x": geo.x(), "y": geo.y(), "w": geo.width(), "h": geo.height()}
+
+    candidate = find_browser_window()
+    if not candidate:
+        tooltip("Quick Image Search : aucun navigateur detecte a l'ecran.")
+        return
+
+    b_hwnd, b_cls, b_title, (bx, by, bw, bh) = candidate
+    browser_rect = {"x": bx, "y": by, "w": bw, "h": bh}
+
+    conf = get_config()
+    conf["custom_anki_rect"] = anki_rect
+    conf["custom_browser_rect"] = browser_rect
+    conf["layout_mode"] = "custom"
+    conf["snap_layout_enabled"] = True
+    save_config(conf)
+
+    tooltip(
+        "Disposition Quick Image Search memorisee :\n"
+        f"Anki ({anki_rect['w']}x{anki_rect['h']}) a droite | "
+        f"Navigateur ({browser_rect['w']}x{browser_rect['h']}) a gauche"
+    )
 
 
 def on_search_images(editor):
@@ -438,7 +761,12 @@ def on_search_images(editor):
 
     params = urllib.parse.urlencode({"tbm": "isch", "q": text})
     url = "https://www.%s/search?%s" % (domain, params)
-    webbrowser.open(url)
+
+    if conf.get("snap_layout_enabled", True):
+        apply_side_by_side_layout(editor, url)
+    else:
+        webbrowser.open(url)
+
     tooltip("Searching images for: %s" % text)
 
 
@@ -492,3 +820,45 @@ gui_hooks.editor_did_load_note.append(install_web_shortcut)
 
 # Register custom config dialog so it opens instead of raw JSON
 mw.addonManager.setConfigAction(__name__, on_config)
+
+# Menu Tools action for memorizing layout
+def setup_tools_menu():
+    action = QAction("Quick Image Search : Memoriser la disposition des fenetres", mw)
+    action.triggered.connect(on_memorize_current_layout)
+    mw.form.menuTools.addAction(action)
+
+if hasattr(mw, "form") and hasattr(mw.form, "menuTools"):
+    setup_tools_menu()
+elif hasattr(gui_hooks, "main_window_did_init"):
+    gui_hooks.main_window_did_init.append(setup_tools_menu)
+
+
+# Compatibility with Anki's NewEditor (Svelte editor in modern Anki)
+try:
+    from aqt.editor import NewEditor
+    if not hasattr(NewEditor, "note"):
+        def _get_new_editor_note(self):
+            cached = getattr(self, "_note_compat_cache", None)
+            cur_nid = getattr(self, "nid", None)
+            if cached is not None and (cur_nid is None or getattr(cached, "id", None) == cur_nid):
+                return cached
+            if cur_nid:
+                col = getattr(mw, "col", None) or getattr(getattr(self, "mw", None), "col", None)
+                if col:
+                    try:
+                        n = col.get_note(int(cur_nid))
+                        self._note_compat_cache = n
+                        return n
+                    except Exception:
+                        return cached
+            return cached
+
+        def _set_new_editor_note(self, val):
+            self._note_compat_cache = val
+            if val is not None and hasattr(val, "id") and val.id:
+                self.nid = val.id
+
+        NewEditor.note = property(_get_new_editor_note, _set_new_editor_note)
+except (ImportError, AttributeError):
+    pass
+

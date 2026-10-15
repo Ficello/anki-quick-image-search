@@ -1,5 +1,9 @@
 {
     "field_name": "Front",
     "google_domain": "google.com",
-    "shortcut": "Ctrl+Shift+1"
+    "shortcut": "Ctrl+Shift+1",
+    "snap_layout_enabled": true,
+    "layout_mode": "anki_right_50",
+    "custom_anki_rect": null,
+    "custom_browser_rect": null
 }
