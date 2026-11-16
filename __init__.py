@@ -25,7 +25,7 @@ import sys
 import time
 import urllib.parse
 import webbrowser
-from typing import Optional
+from typing import Any, Optional
 
 from aqt import mw, gui_hooks
 from aqt.editor import Editor
@@ -422,8 +422,8 @@ def _extract_text_from_fields(fields, model, field_name):
     return strip_html(raw)
 
 
-def _search_url_for_text(text):
-    # type: (str) -> None
+def _open_image_search(text):
+    # type: (Optional[str]) -> None
     if not text:
         tooltip("No card text found.")
         return
@@ -448,42 +448,21 @@ def on_search_images(editor):
     if note is not None and getattr(note, "fields", None):
         model = note.note_type() if hasattr(note, "note_type") else note.model()
         text = _extract_text_from_fields(note.fields, model, field_name)
-        _search_url_for_text(text)
+        _open_image_search(text)
         return
 
     # 2. Modern editor (aqt.editor.NewEditor) using get_note_info asynchronous callback
     if hasattr(editor, "get_note_info"):
         def on_note_info(note_info):
-            try:
-                col = getattr(mw, "col", None) or getattr(getattr(editor, "mw", None), "col", None)
-                if not col:
-                    tooltip("No card text found.")
-                    return
-                model = col.models.get(note_info.mid)
-                if not model:
-                    tooltip("No card text found.")
-                    return
-                text = _extract_text_from_fields(note_info.fields, model, field_name)
-                _search_url_for_text(text)
-            except Exception:
+            model = mw.col.models.get(note_info.mid)
+            if not model:
                 tooltip("No card text found.")
+                return
+            text = _extract_text_from_fields(note_info.fields, model, field_name)
+            _open_image_search(text)
 
         editor.get_note_info(on_note_info)
         return
-
-    # 3. Fallback: try retrieving note from collection via editor.nid
-    nid = getattr(editor, "nid", None)
-    col = getattr(mw, "col", None) or getattr(getattr(editor, "mw", None), "col", None)
-    if nid and col:
-        try:
-            n = col.get_note(int(nid))
-            if n and n.fields:
-                model = n.note_type() if hasattr(n, "note_type") else n.model()
-                text = _extract_text_from_fields(n.fields, model, field_name)
-                _search_url_for_text(text)
-                return
-        except Exception:
-            pass
 
     tooltip("No card text found.")
 
